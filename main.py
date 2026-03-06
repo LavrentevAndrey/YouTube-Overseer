@@ -21,23 +21,37 @@ logger = logging.getLogger("Main")
 def main():
     logger.info("Starting YouTube Overseer...")
     
-    # 1. Platform Detection (Simplified for Linux MVP)
-    if sys.platform != "linux":
-        logger.error("Only Linux is supported in this MVP.")
-        sys.exit(1)
+    # 1. Platform Detection
+    if sys.platform == "linux":
+        try:
+            from platforms.linux.LinuxUrlMonitor import LinuxUrlMonitor
+            from platforms.linux.LinuxNetworkBlocker import LinuxNetworkBlocker
+            from platforms.linux.LinuxNotificationProvider import LinuxNotificationProvider
+        except ImportError as e:
+            logger.critical(f"Failed to import Linux platform modules: {e}")
+            sys.exit(1)
 
-    try:
-        from platforms.linux.LinuxUrlMonitor import LinuxUrlMonitor
-        from platforms.linux.LinuxNetworkBlocker import LinuxNetworkBlocker
-        from platforms.linux.LinuxNotificationProvider import LinuxNotificationProvider
-    except ImportError as e:
-        logger.critical(f"Failed to import platform modules: {e}")
-        sys.exit(1)
+        # 2. Instantiate Components
+        monitor = LinuxUrlMonitor()
+        blocker = LinuxNetworkBlocker()
+        notifier = LinuxNotificationProvider()
+        
+    elif sys.platform == "win32":
+        try:
+            from platforms.windows.WindowsUrlMonitor import WindowsUrlMonitor
+            from platforms.windows.WindowsNetworkBlocker import WindowsNetworkBlocker
+            from platforms.windows.WindowsNotificationProvider import WindowsNotificationProvider
+        except ImportError as e:
+            logger.critical(f"Failed to import Windows platform modules: {e}")
+            sys.exit(1)
 
-    # 2. Instantiate Components
-    monitor = LinuxUrlMonitor()
-    blocker = LinuxNetworkBlocker()
-    notifier = LinuxNotificationProvider()
+        # 2. Instantiate Components
+        monitor = WindowsUrlMonitor()
+        blocker = WindowsNetworkBlocker()
+        notifier = WindowsNotificationProvider()
+    else:
+        logger.error(f"Platform {sys.platform} is not supported.")
+        sys.exit(1)
 
     # 3. Instantiate Engine
     db_path = os.path.join(BASE_DIR, ".tmp", "overseer.db")
