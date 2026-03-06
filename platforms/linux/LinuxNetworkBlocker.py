@@ -2,6 +2,7 @@ import subprocess
 import logging
 import sys
 import os
+import time
 from typing import List
 from interfaces.INetworkBlocker import INetworkBlocker
 
@@ -10,17 +11,20 @@ class LinuxNetworkBlocker(INetworkBlocker):
 
     def __init__(self):
         self.logger = logging.getLogger(__name__)
+        self._is_blocked_cache = False
+        self._last_check_time = 0
+        self._cache_ttl = 30  # seconds
 
     def _run_sudo_command(self, cmd: List[str]) -> bool:
         """Runs a command with sudo privileges."""
         try:
-            full_cmd = ['sudo'] + cmd
+            full_cmd = ['sudo', '-n'] + cmd
             # We use check_call which waits for the command to complete.
-            # Only works if user has NOPASSWD or is interacting with terminal.
-            subprocess.check_call(full_cmd)
+            # Using stdout=DEVNULL to avoid spamming the console
+            subprocess.check_call(full_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return True
         except subprocess.CalledProcessError as e:
-            self.logger.error(f"Command failed: {e}")
+            self.logger.error(f"Sudo command '{cmd[0]}' failed. Your user requires NOPASSWD in visudo or the background process will fail.")
             return False
 
     def block_target(self, target: str) -> bool:
@@ -56,25 +60,42 @@ class LinuxNetworkBlocker(INetworkBlocker):
 
         # 2. Ensure Chain Exists
         # sudo iptables -N OVERSEER_BLOCK (might fail if exists, ignores error)
-        subprocess.call(['sudo', 'iptables', '-N', self.CHAIN_NAME], stderr=subprocess.DEVNULL)
+        subprocess.call(['sudo', '-n', 'iptables', '-N', self.CHAIN_NAME], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         # 3. Ensure Jump Rule
         # Check if exists: sudo iptables -C OUTPUT -j OVERSEER_BLOCK
-        if subprocess.call(['sudo', 'iptables', '-C', 'OUTPUT', '-j', self.CHAIN_NAME], stderr=subprocess.DEVNULL) != 0:
-            self._run_sudo_command(['iptables', '-A', 'OUTPUT', '-j', self.CHAIN_NAME])
+        if subprocess.call(['sudo', '-n', 'iptables', '-C', 'OUTPUT', '-j', self.CHAIN_NAME], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0:
+            if not self._run_sudo_command(['iptables', '-A', 'OUTPUT', '-j', self.CHAIN_NAME]):
+                # If we cannot even add the jump rule, stop early and throttle
+                time.sleep(10)
+                return False
 
         # 4. Add Rules
+        current_rules = ""
+        try:
+            current_rules = subprocess.check_output(['sudo', '-n', 'iptables', '-S', self.CHAIN_NAME], stderr=subprocess.DEVNULL).decode('utf-8')
+        except subprocess.CalledProcessError:
+            # Check if sudo auth is failing
+            if subprocess.call(['sudo', '-n', 'true'], stderr=subprocess.DEVNULL) != 0:
+                self.logger.error("sudo requires password. Cannot enforce blocks. Please configure NOPASSWD.")
+                time.sleep(10) # 10s cooldown to prevent tight loop from spamming logs
+                return False
+
         print(f"Blocking {len(ips)} IPs...")
         success_count = 0
         for ip in ips:
-            # Check if rule exists
-            check_cmd = ['sudo', 'iptables', '-C', self.CHAIN_NAME, '-d', ip, '-j', 'DROP']
-            if subprocess.call(check_cmd, stderr=subprocess.DEVNULL) != 0:
+            # Check if rule exists in the cached output to avoid running sudo for each IP
+            if f"-d {ip}/32" not in current_rules and f"-d {ip} " not in current_rules:
                 if self._run_sudo_command(['iptables', '-A', self.CHAIN_NAME, '-d', ip, '-j', 'DROP']):
                     success_count += 1
         
         print(f"Blocked {success_count} new IPs.")
-        return True
+        
+        if success_count > 0 or len(ips) > 0:
+            self._is_blocked_cache = True
+            self._last_check_time = time.time()
+            return True
+        return False
 
     def unblock_target(self, target: str) -> bool:
         """
@@ -85,17 +106,30 @@ class LinuxNetworkBlocker(INetworkBlocker):
              script_path = os.path.abspath("execution/cleanup_iptables.sh")
 
         print("Lifting network blocks...")
-        return self._run_sudo_command(['bash', script_path])
+        success = self._run_sudo_command(['bash', script_path])
+        if success:
+            self._is_blocked_cache = False
+            self._last_check_time = time.time()
+        return success
 
     def is_blocked(self, target: str) -> bool:
         """
         Checks if the custom chain has rules.
+        Uses caching to avoid spanning PAM and system processes.
         """
+        now = time.time()
+        if now - self._last_check_time < self._cache_ttl:
+            return self._is_blocked_cache
+
         try:
             # Check if chain has any rules
-            # iptables -L OVERSEER_BLOCK -n | grep DROP
-            output = subprocess.check_output(['sudo', 'iptables', '-L', self.CHAIN_NAME, '-n'], stderr=subprocess.DEVNULL)
-            return b"DROP" in output
+            output = subprocess.check_output(['sudo', '-n', 'iptables', '-L', self.CHAIN_NAME, '-n'], stderr=subprocess.DEVNULL)
+            is_blocked = b"DROP" in output
+            self._is_blocked_cache = is_blocked
+            self._last_check_time = now
+            return is_blocked
         except subprocess.CalledProcessError:
-            # Chain doesn't exist?
+            # The chain doesn't exist, or sudo auth failed
+            self._is_blocked_cache = False
+            self._last_check_time = now
             return False

@@ -5,6 +5,7 @@ implementation_plan.md
 walkthrough.md
 **/.gemini/
 **/.agent/
+pyrightconfig.json
 
 # Python
 __pycache__/

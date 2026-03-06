@@ -5,12 +5,14 @@ import logging
 import signal
 from core.BudgetEngine import BudgetEngine
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # Configure Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("overseer.log"),
+        logging.FileHandler(os.path.join(BASE_DIR, "overseer.log")),
         logging.StreamHandler()
     ]
 )
@@ -38,7 +40,8 @@ def main():
     notifier = LinuxNotificationProvider()
 
     # 3. Instantiate Engine
-    engine = BudgetEngine(monitor, blocker, notifier)
+    db_path = os.path.join(BASE_DIR, ".tmp", "overseer.db")
+    engine = BudgetEngine(monitor, blocker, notifier, db_path=db_path)
     
     # 4. Handle Signals
     def signal_handler(sig, frame):
